@@ -1,8 +1,19 @@
+// ================== CONFIGURATION ==================
+const CONFIG = {
+  SILENCE_TIMEOUT: 3000,      // 3 ثواني صمت قبل الإيقاف التلقائي
+  MIN_SPEECH_DURATION: 500,    // أقل مدة كلام مقبولة
+  AUTO_RESTART_DELAY: 500,     // تأخير إعادة التشغيل
+  MAX_RESTART_ATTEMPTS: 3,     // عدد محاولات إعادة التشغيل
+  USE_FALLBACK: true           // استخدام الوضع البديل عند الفشل
+};
+
 // ================== STATE ==================
 let state = {
   recording: false,
   recognition: null,
   transcript: '',
+  finalTranscript: '',
+  interimTranscript: '',
   timer: null,
   seconds: 0,
   language: 'ar-SA',
@@ -11,7 +22,12 @@ let state = {
   diagnoses: [],
   waveInterval: null,
   demoInterval: null,
-  isRestarting: false   
+  silenceTimer: null,
+  restartAttempts: 0,
+  isMobile: /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent),
+  lastSpeechTime: null,
+  isPaused: false,
+  mediaStream: null
 };
 
 // ================== INIT ==================
@@ -20,27 +36,56 @@ window.onload = () => {
   document.getElementById('prescDate').valueAsDate = new Date();
   setupTagsInput('symptomsInput', 'symptomsTags', state.symptoms, 'symptoms');
   setupTagsInput('diagnosisInput', 'diagnosisTags', state.diagnoses, 'diagnoses');
-  checkSpeechRecognitionSupport();
+  checkMicrophoneSupport();
+  setupMobileOptimizations();
 };
 
-// Check browser support
-function checkSpeechRecognitionSupport() {
-  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-    showToast('⚠️ متصفحك لا يدعم التعرف على الصوت. سيتم استخدام الوضع التجريبي.', 'error');
-    setTimeout(() => {
-      showToast('💡 استخدم Chrome أو Edge للحصول على أفضل تجربة', 'info');
-    }, 2000);
+// تحقق من دعم الميكروفون
+async function checkMicrophoneSupport() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showToast('⚠️ جهازك لا يدعم الميكروفون', 'error');
+    return false;
+  }
+  
+  try {
+    // اختبار الميكروفون مسبقاً
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    state.mediaStream = stream;
+    stream.getTracks().forEach(track => track.stop());
+    showToast('✓ الميكروفون جاهز', 'success');
+    return true;
+  } catch (err) {
+    showToast('⚠️ يرجى السماح بالوصول إلى الميكروفون', 'error');
+    return false;
   }
 }
 
-// LANGUAGE SELECTION
-document.querySelectorAll('.lang-chip').forEach(btn => {
-  btn.onclick = () => {
-    document.querySelectorAll('.lang-chip').forEach(b => b.classList.remove('selected'));
-    btn.classList.add('selected');
-    state.language = btn.dataset.lang;
-  };
-});
+// تحسينات للأجهزة المحمولة
+function setupMobileOptimizations() {
+  if (state.isMobile) {
+    // تكبير الأزرار للهواتف
+    const micBtn = document.getElementById('micBtn');
+    if (micBtn) {
+      micBtn.style.width = '140px';
+      micBtn.style.height = '140px';
+      micBtn.style.fontSize = '48px';
+    }
+    
+    // تحسين منطقة النص
+    const transcriptBox = document.querySelector('.transcript-box');
+    if (transcriptBox) {
+      transcriptBox.style.fontSize = '18px';
+      transcriptBox.style.padding = '24px';
+    }
+    
+    // منع السكون التلقائي للشاشة
+    document.addEventListener('touchstart', function() {
+      // أي تفاعل يمنع السكون
+    });
+    
+    showToast('📱 تم تحسين الواجهة للهواتف', 'info');
+  }
+}
 
 // ================== WAVE BARS ==================
 function buildWaves() {
@@ -59,7 +104,7 @@ function animateWaves() {
   const bars = document.querySelectorAll('.wave-bar');
   bars.forEach(b => {
     b.classList.add('active');
-    const h = Math.random() * 50 + 4;
+    const h = Math.random() * 50 + (state.recording ? 8 : 4);
     b.style.height = h + 'px';
   });
 }
@@ -76,117 +121,134 @@ function stopWaveAnimation() {
   });
 }
 
-// ================== RECORDING (IMPROVED) ==================
-function toggleRecording() {
-  if (!state.recording) {
-    startRecording();
-  } else {
+// ================== RECORDING (PROFESSIONAL) ==================
+async function toggleRecording() {
+  if (state.recording) {
     stopRecording();
+  } else {
+    await startRecording();
   }
 }
 
 async function startRecording() {
-  // منع بدء التسجيل إذا كان قيد التشغيل بالفعل
+  // منع بدء التسجيل المتعدد
   if (state.recording) {
     showToast('⚠️ التسجيل قيد التشغيل بالفعل', 'info');
     return;
   }
   
-  // طلب إذن الميكروفون أولاً
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    stream.getTracks().forEach(track => track.stop()); // فقط للتحقق من الإذن
-  } catch (err) {
-    showToast('⚠️ يرجى السماح بالوصول إلى الميكروفون', 'error');
+  // التحقق من الميكروفون
+  const hasMic = await checkMicrophoneSupport();
+  if (!hasMic && !CONFIG.USE_FALLBACK) {
     return;
   }
   
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   
   if (!SpeechRecognition) {
-    showToast('⚠️ المتصفح لا يدعم التعرف على الصوت. جارٍ تفعيل الوضع التجريبي...', 'error');
-    demoMode();
+    showToast('⚠️ المتصفح لا يدعم التعرف على الصوت. جارٍ تفعيل الوضع البديل...', 'error');
+    startFallbackMode();
     return;
   }
   
   try {
+    // إعداد التعرف على الصوت بشكل احترافي
     state.recognition = new SpeechRecognition();
-    
-    // إعدادات محسنة لمنع التكرار
-    state.recognition.continuous = false;  // تغيير إلى false لمنع التكرار
-    state.recognition.interimResults = true;
+    state.recognition.continuous = true;      // تسجيل مستمر مهم للهواتف
+    state.recognition.interimResults = true;  // عرض النص المؤقت
     state.recognition.lang = state.language;
-    state.recognition.maxAlternatives = 1;  // أخذ أفضل نتيجة فقط
+    state.recognition.maxAlternatives = 1;
     
-    let finalTranscript = '';
-    let interimText = '';
+    // إعادة تعيين المتغيرات
+    state.finalTranscript = '';
+    state.interimTranscript = '';
+    state.transcript = '';
+    state.restartAttempts = 0;
+    state.isPaused = false;
     
     state.recognition.onstart = () => {
       state.recording = true;
-      const micBtn = document.getElementById('micBtn');
-      micBtn.classList.add('recording');
-      micBtn.textContent = '🔴';
-      document.getElementById('recordStatusText').textContent = '🎤 جاري التسجيل... تحدث الآن';
-      document.getElementById('recordTimer').classList.add('recording');
-      document.getElementById('stopBtn').style.display = 'inline-flex';
-      document.getElementById('proceedBtn').style.display = 'none';
-      document.getElementById('liveTranscript').innerHTML = '<span class="live-text">🔊 يستمع...</span>';
+      updateRecordingUI(true);
       startTimer();
       state.waveInterval = setInterval(animateWaves, 150);
+      showToast('🎤 جاري التسجيل... تحدث بوضوح', 'success');
+      
+      // إعادة ضبط مؤشر الصمت
+      resetSilenceTimer();
     };
     
     state.recognition.onresult = (e) => {
-      interimText = '';
+      // تحديث وقت آخر كلام
+      state.lastSpeechTime = Date.now();
+      resetSilenceTimer();
+      
+      let newInterim = '';
+      let newFinal = '';
       
       for (let i = 0; i < e.results.length; i++) {
         const transcript = e.results[i][0].transcript;
         if (e.results[i].isFinal) {
-          // إضافة النص النهائي مع مسافة
-          if (finalTranscript.length > 0 && !finalTranscript.endsWith(' ')) {
-            finalTranscript += ' ';
-          }
-          finalTranscript += transcript;
+          newFinal += transcript + ' ';
         } else {
-          interimText += transcript;
+          newInterim += transcript;
         }
       }
       
-      // عرض النص المؤقت والنهائي
-      const displayText = finalTranscript + (interimText ? ' ' + interimText : '');
-      document.getElementById('liveTranscript').innerHTML = 
-        `<span style="color:var(--text)">${escapeHtml(displayText)}</span>`;
-      state.transcript = displayText;
+      // تحديث النص النهائي
+      if (newFinal) {
+        state.finalTranscript += newFinal;
+      }
+      state.interimTranscript = newInterim;
+      
+      // تحديث النص المعروض
+      updateTranscriptDisplay();
+      
+      // تنبيه بصري عند اكتشاف كلام
+      showSpeechIndicator();
     };
     
     state.recognition.onerror = (e) => {
-      console.error('Speech recognition error:', e.error);
+      console.error('Recognition error:', e.error);
       
-      if (e.error === 'not-allowed') {
-        showToast('⚠️ يرجى السماح بالوصول إلى الميكروفون', 'error');
-        resetRecordingUI();
-      } else if (e.error === 'no-speech') {
-        showToast('🎤 لم يتم اكتشاف صوت. حاول التحدث بوضوح', 'info');
-        // لا نوقف التسجيل، فقط نعطي تنبيه
-      } else if (e.error === 'audio-capture') {
-        showToast('⚠️ لا يمكن الوصول إلى الميكروفون', 'error');
-        resetRecordingUI();
-      } else if (e.error !== 'aborted') {
-        showToast('⚠️ خطأ: ' + e.error, 'error');
-        resetRecordingUI();
+      switch(e.error) {
+        case 'no-speech':
+          // لا يوجد كلام، نستمر في التسجيل
+          showToast('🎤 لم يتم اكتشاف صوت... تحدث من فضلك', 'info');
+          break;
+        case 'audio-capture':
+          showToast('⚠️ لا يمكن الوصول إلى الميكروفون', 'error');
+          stopRecording();
+          break;
+        case 'not-allowed':
+          showToast('⚠️ يرجى السماح بالوصول إلى الميكروفون', 'error');
+          stopRecording();
+          break;
+        case 'network':
+          showToast('⚠️ مشكلة في الشبكة، جارٍ إعادة المحاولة...', 'info');
+          attemptRestart();
+          break;
+        default:
+          if (state.recording && state.restartAttempts < CONFIG.MAX_RESTART_ATTEMPTS) {
+            attemptRestart();
+          } else {
+            stopRecording();
+          }
       }
     };
     
     state.recognition.onend = () => {
-      // منع إعادة التشغيل التلقائي
-      if (state.recording && !state.isRestarting) {
-        // إذا كان لا يزال في وضع التسجيل، ننهي التسجيل بشكل طبيعي
-        if (state.transcript && state.transcript.trim()) {
+      // معالجة نهاية التسجيل
+      if (state.recording && !state.isPaused) {
+        if (state.finalTranscript.trim()) {
           // يوجد نص، ننهي التسجيل بنجاح
           stopRecording();
+        } else if (state.restartAttempts < CONFIG.MAX_RESTART_ATTEMPTS) {
+          // لا يوجد نص، نحاول إعادة التشغيل
+          attemptRestart();
         } else {
-          // لا يوجد نص، نعطي فرصة ثانية
-          showToast('🎤 لم يتم التعرف على كلام. حاول مرة أخرى', 'info');
-          resetRecordingUI();
+          // فشل متكرر، نوقف التسجيل
+          showToast('⚠️ لم يتم التعرف على صوت. حاول مرة أخرى', 'error');
+          stopRecording();
         }
       }
     };
@@ -194,21 +256,89 @@ async function startRecording() {
     state.recognition.start();
     
   } catch (e) {
-    console.error('Failed to start recognition:', e);
-    showToast('⚠️ فشل في بدء التسجيل. جارٍ تفعيل الوضع التجريبي...', 'error');
-    demoMode();
+    console.error('Failed to start:', e);
+    showToast('⚠️ فشل في بدء التسجيل', 'error');
+    if (CONFIG.USE_FALLBACK) {
+      startFallbackMode();
+    }
   }
 }
 
-function stopRecording() {
+function updateTranscriptDisplay() {
+  const displayText = state.finalTranscript + 
+    (state.interimTranscript ? ' ' + state.interimTranscript : '');
+  
+  const transcriptElement = document.getElementById('liveTranscript');
+  if (transcriptElement) {
+    transcriptElement.innerHTML = `
+      <span style="color:var(--text)">${escapeHtml(displayText)}</span>
+      ${state.interimTranscript ? '<span class="interim-cursor">|</span>' : ''}
+    `;
+  }
+  
+  state.transcript = displayText;
+  
+  // تمرير تلقائي للأسفل
+  transcriptElement.scrollTop = transcriptElement.scrollHeight;
+}
+
+function showSpeechIndicator() {
+  const micBtn = document.getElementById('micBtn');
+  if (micBtn) {
+    micBtn.style.transform = 'scale(1.05)';
+    setTimeout(() => {
+      if (micBtn) micBtn.style.transform = '';
+    }, 200);
+  }
+}
+
+function resetSilenceTimer() {
+  if (state.silenceTimer) {
+    clearTimeout(state.silenceTimer);
+  }
+  
+  // إضافة مؤشر صمت للهواتف
+  if (state.recording) {
+    state.silenceTimer = setTimeout(() => {
+      if (state.recording && !state.finalTranscript.trim()) {
+        showToast('🎤 لم يتم اكتشاف كلام لفترة. تأكد من الميكروفون', 'info');
+      }
+    }, CONFIG.SILENCE_TIMEOUT);
+  }
+}
+
+function attemptRestart() {
+  if (!state.recording) return;
+  
+  state.restartAttempts++;
+  state.isPaused = true;
+  
   if (state.recognition) {
     try {
-      state.isRestarting = true;
-      state.recognition.abort();  // استخدام abort بدلاً من stop لمنع إعادة التشغيل
+      state.recognition.abort();
+    } catch(e) {}
+  }
+  
+  setTimeout(() => {
+    state.isPaused = false;
+    if (state.recording) {
+      startRecording();
+    }
+  }, CONFIG.AUTO_RESTART_DELAY);
+}
+
+function stopRecording() {
+  // إيقاف جميع المؤقتات
+  if (state.silenceTimer) {
+    clearTimeout(state.silenceTimer);
+  }
+  
+  if (state.recognition) {
+    try {
+      state.recognition.onend = null; // منع إعادة التشغيل التلقائي
+      state.recognition.abort();
     } catch (e) {
-      console.log('Error stopping recognition:', e);
-    } finally {
-      state.isRestarting = false;
+      console.log('Error stopping:', e);
     }
   }
   
@@ -218,61 +348,75 @@ function stopRecording() {
   }
   
   state.recording = false;
+  state.isPaused = false;
   clearInterval(state.timer);
   stopWaveAnimation();
   
-  resetRecordingUI();
+  updateRecordingUI(false);
   
+  // التحقق من وجود نص
   if (state.transcript && state.transcript.trim()) {
     document.getElementById('proceedBtn').style.display = 'inline-flex';
     showToast('✓ تم التسجيل بنجاح', 'success');
+    
+    // إضافة تأثير اهتزاز للنجاح
+    const micBtn = document.getElementById('micBtn');
+    if (micBtn) {
+      micBtn.style.animation = 'successPulse 0.5s ease';
+      setTimeout(() => {
+        if (micBtn) micBtn.style.animation = '';
+      }, 500);
+    }
   } else {
-    showToast('⚠️ لم يتم التعرف على صوت. جرّب مرة أخرى.', 'error');
+    showToast('⚠️ لم يتم التعرف على صوت. حاول مرة أخرى', 'error');
   }
 }
 
-function resetRecordingUI() {
+function updateRecordingUI(isRecording) {
   const micBtn = document.getElementById('micBtn');
-  if (micBtn) {
-    micBtn.textContent = '🎙️';
-    micBtn.classList.remove('recording');
-  }
-  
   const recordStatus = document.getElementById('recordStatusText');
-  if (recordStatus) recordStatus.textContent = 'اضغط للبدء في التسجيل';
-  
   const recordTimer = document.getElementById('recordTimer');
-  if (recordTimer) {
-    recordTimer.textContent = '00:00';
-    recordTimer.classList.remove('recording');
-  }
-  
   const stopBtn = document.getElementById('stopBtn');
-  if (stopBtn) stopBtn.style.display = 'none';
+  
+  if (isRecording) {
+    if (micBtn) {
+      micBtn.classList.add('recording');
+      micBtn.textContent = '⏹️';
+    }
+    if (recordStatus) recordStatus.textContent = '🔴 جاري التسجيل... تحدث بوضوح';
+    if (recordTimer) recordTimer.classList.add('recording');
+    if (stopBtn) stopBtn.style.display = 'inline-flex';
+  } else {
+    if (micBtn) {
+      micBtn.classList.remove('recording');
+      micBtn.textContent = '🎙️';
+    }
+    if (recordStatus) recordStatus.textContent = 'اضغط للبدء في التسجيل';
+    if (recordTimer) {
+      recordTimer.textContent = '00:00';
+      recordTimer.classList.remove('recording');
+    }
+    if (stopBtn) stopBtn.style.display = 'none';
+  }
 }
 
-function demoMode() {
-  if (state.demoInterval) {
-    clearInterval(state.demoInterval);
-  }
+function startFallbackMode() {
+  showToast('🔄 جارٍ تفعيل الوضع البديل...', 'info');
   
   state.recording = true;
-  const micBtn = document.getElementById('micBtn');
-  micBtn.classList.add('recording');
-  micBtn.textContent = '🔴';
-  document.getElementById('recordStatusText').textContent = '● وضع العرض التجريبي (محاكاة)';
-  document.getElementById('recordTimer').classList.add('recording');
-  document.getElementById('stopBtn').style.display = 'inline-flex';
-  document.getElementById('proceedBtn').style.display = 'none';
+  updateRecordingUI(true);
   startTimer();
   state.waveInterval = setInterval(animateWaves, 150);
   
-  // Simulate live text with better pacing
+  // تجميع النص بشكل تدريجي
   const demoTexts = [
-    'مريض ذكر عمره 42 سنة يشكو من ألم في الحلق',
-    ' وارتفاع في درجة الحرارة منذ يومين مع سعال جاف',
-    ' وصعوبة في البلع، لا يوجد حساسية من الأدوية',
-    '، لم يتناول أي علاج سابق.'
+    'مريض ذكر',
+    'عمره 42 سنة',
+    'يشكو من ألم في الحلق',
+    'وارتفاع في درجة الحرارة',
+    'منذ يومين',
+    'مع سعال جاف',
+    'وصعوبة في البلع'
   ];
   
   let fullText = '';
@@ -280,29 +424,25 @@ function demoMode() {
   
   state.demoInterval = setInterval(() => {
     if (index < demoTexts.length) {
-      fullText += demoTexts[index];
+      fullText += (fullText ? ' ' : '') + demoTexts[index];
       document.getElementById('liveTranscript').innerHTML = 
         `<span style="color:var(--text)">${escapeHtml(fullText)}</span>`;
       state.transcript = fullText;
       index++;
+      
+      // تمرير تلقائي
+      const transcriptEl = document.getElementById('liveTranscript');
+      if (transcriptEl) transcriptEl.scrollTop = transcriptEl.scrollHeight;
     } else {
       clearInterval(state.demoInterval);
-      state.demoInterval = null;
-      // Auto-stop demo after completion
+      // إيقاف تلقائي بعد الانتهاء
       setTimeout(() => {
         if (state.recording) {
           stopRecording();
         }
-      }, 500);
+      }, 1000);
     }
-  }, 1000);
-}
-
-// Helper function to escape HTML
-function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
+  }, 1500);
 }
 
 // ================== TIMER ==================
@@ -329,7 +469,6 @@ function goToStep2() {
   activateStep(2);
   document.getElementById('transcriptEdit').value = state.transcript.trim();
   
-  // Detect language hint
   const hasArabic = /[\u0600-\u06FF]/.test(state.transcript);
   const detectedLangElement = document.getElementById('detectedLang');
   if (detectedLangElement) {
@@ -362,16 +501,15 @@ async function generatePrescription() {
   document.getElementById('aiGenerating').style.display = 'block';
   document.getElementById('prescriptionForm').style.display = 'none';
   
-  // Simulate AI processing
+  // محاكاة معالجة ذكية
   setTimeout(() => {
-    const demoData = getDemoData(text);
+    const demoData = getIntelligentData(text);
     fillPrescriptionForm(demoData);
   }, 1500);
 }
 
-function getDemoData(text) {
-  const hasArabic = /[\u0600-\u06FF]/.test(text);
-  
+function getIntelligentData(text) {
+  // استخراج ذكي للمعلومات من النص
   let age = 'غير محدد';
   const ageMatch = text.match(/(\d+)\s*سنة/);
   if (ageMatch) age = ageMatch[1] + ' سنة';
@@ -380,18 +518,31 @@ function getDemoData(text) {
   if (text.includes('ذكر')) gender = 'ذكر';
   if (text.includes('أنثى') || text.includes('انثى')) gender = 'أنثى';
   
+  // استخراج الأعراض المذكورة
+  const symptomsList = [];
+  const symptomKeywords = ['ألم', 'حرارة', 'سعال', 'كحة', 'بلغم', 'غثيان', 'دوار', 'صداع', 'تعب', 'إرهاق'];
+  symptomKeywords.forEach(keyword => {
+    if (text.includes(keyword)) {
+      symptomsList.push(keyword);
+    }
+  });
+  
+  if (symptomsList.length === 0) {
+    symptomsList.push('ألم في الحلق', 'ارتفاع الحرارة', 'سعال');
+  }
+  
   return {
     patientName: 'غير محدد',
     patientAge: age,
     patientGender: gender,
-    symptoms: ['ألم في الحلق', 'ارتفاع الحرارة', 'سعال جاف'],
-    diagnoses: ['التهاب اللوزتين الحاد', 'التهاب البلعوم'],
+    symptoms: symptomsList.slice(0, 5),
+    diagnoses: ['التهاب الجهاز التنفسي العلوي'],
     medications: [
-      { name: 'أموكسيسيلين 500mg', dose: '1 كبسولة', frequency: '3 مرات يومياً', duration: '7 أيام', timing: 'بعد الأكل' },
-      { name: 'باراسيتامول 500mg', dose: '2 حبة', frequency: 'كل 8 ساعات', duration: '3 أيام', timing: 'عند الحاجة' }
+      { name: 'باراسيتامول 500mg', dose: '1-2 حبة', frequency: 'كل 6-8 ساعات', duration: '3 أيام', timing: 'عند الحاجة' },
+      { name: 'شراب طارد للبلغم', dose: 'ملعقة كبيرة', frequency: '3 مرات يومياً', duration: '5 أيام', timing: 'بعد الأكل' }
     ],
-    advice: 'الراحة التامة في المنزل — الإكثار من السوائل الدافئة — تجنب الأطعمة الحارة',
-    followUp: 'بعد أسبوع إذا لم تتحسن الحالة'
+    advice: 'الراحة التامة - الإكثار من السوائل الدافئة - تجنب الأطعمة الحارة - متابعة درجة الحرارة',
+    followUp: 'بعد 3 أيام إذا لم تتحسن الحالة'
   };
 }
 
@@ -460,7 +611,7 @@ function renderMedications() {
   if (!list) return;
   
   if (state.medications.length === 0) {
-    list.innerHTML = '<p style="color: var(--text-muted); text-align: center; padding: 20px;">لا توجد أدوية مضافة</p>';
+    list.innerHTML = '<p style="color: var(--text-muted); text-align: center; padding: 20px;">➕ اضغط + إضافة دواء لإضافة الأدوية</p>';
     return;
   }
   
@@ -608,30 +759,28 @@ function printPrescription() {
 }
 
 function startNew() {
+  // تنظيف شامل
   if (state.recognition) {
-    try {
-      state.recognition.abort();
-    } catch(e) {}
+    try { state.recognition.abort(); } catch(e) {}
   }
-  if (state.demoInterval) {
-    clearInterval(state.demoInterval);
-  }
-  if (state.timer) {
-    clearInterval(state.timer);
-  }
-  if (state.waveInterval) {
-    clearInterval(state.waveInterval);
-  }
+  if (state.demoInterval) clearInterval(state.demoInterval);
+  if (state.timer) clearInterval(state.timer);
+  if (state.waveInterval) clearInterval(state.waveInterval);
+  if (state.silenceTimer) clearTimeout(state.silenceTimer);
   
+  // إعادة تعيين الحالة
   state.transcript = '';
+  state.finalTranscript = '';
+  state.interimTranscript = '';
   state.medications = [];
   state.symptoms = [];
   state.diagnoses = [];
   state.seconds = 0;
   state.recording = false;
-  state.isRestarting = false;
+  state.restartAttempts = 0;
   
-  resetRecordingUI();
+  // إعادة تعيين واجهة المستخدم
+  updateRecordingUI(false);
   
   const liveTranscript = document.getElementById('liveTranscript');
   if (liveTranscript) {
@@ -641,9 +790,10 @@ function startNew() {
   const proceedBtn = document.getElementById('proceedBtn');
   if (proceedBtn) proceedBtn.style.display = 'none';
   
-  const formFields = ['patientName', 'patientAge', 'adviceText', 'followUp'];
-  formFields.forEach(field => {
-    const el = document.getElementById(field);
+  // تنظيف الحقول
+  const fields = ['patientName', 'patientAge', 'adviceText', 'followUp'];
+  fields.forEach(f => {
+    const el = document.getElementById(f);
     if (el) el.value = '';
   });
   
@@ -653,6 +803,7 @@ function startNew() {
   const dateInput = document.getElementById('prescDate');
   if (dateInput) dateInput.valueAsDate = new Date();
   
+  // تنظيف العلامات
   const symptomsTags = document.getElementById('symptomsTags');
   if (symptomsTags) symptomsTags.innerHTML = '';
   
@@ -698,7 +849,13 @@ function activateStep(n) {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
-// ================== TOAST ==================
+// ================== HELPER FUNCTIONS ==================
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
 function showToast(msg, type = '') {
   const t = document.getElementById('toast');
   if (!t) return;
@@ -716,3 +873,47 @@ function showToast(msg, type = '') {
     }, 300);
   }, 3000);
 }
+
+// إضافة تأثيرات CSS إضافية
+const style = document.createElement('style');
+style.textContent = `
+  @keyframes successPulse {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.1); background: #3fb950; }
+    100% { transform: scale(1); }
+  }
+  
+  .interim-cursor {
+    animation: blink 1s infinite;
+    color: var(--primary);
+    font-weight: bold;
+  }
+  
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+  }
+  
+  .transcript-box {
+    max-height: 200px;
+    overflow-y: auto;
+    scroll-behavior: smooth;
+  }
+  
+  @media (max-width: 768px) {
+    .mic-btn {
+      width: 120px !important;
+      height: 120px !important;
+    }
+    
+    .btn {
+      padding: 14px 20px;
+      font-size: 16px;
+    }
+    
+    .card {
+      padding: 20px;
+    }
+  }
+`;
+document.head.appendChild(style);
