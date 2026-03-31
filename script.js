@@ -10,7 +10,8 @@ let state = {
   symptoms: [],
   diagnoses: [],
   waveInterval: null,
-  demoInterval: null
+  demoInterval: null,
+  isRestarting: false   
 };
 
 // ================== INIT ==================
@@ -38,9 +39,6 @@ document.querySelectorAll('.lang-chip').forEach(btn => {
     document.querySelectorAll('.lang-chip').forEach(b => b.classList.remove('selected'));
     btn.classList.add('selected');
     state.language = btn.dataset.lang;
-    if (state.recognition && state.recognition.lang) {
-      state.recognition.lang = state.language;
-    }
   };
 });
 
@@ -78,21 +76,31 @@ function stopWaveAnimation() {
   });
 }
 
-// ================== RECORDING ==================
+// ================== RECORDING (IMPROVED) ==================
 function toggleRecording() {
   if (!state.recording) {
     startRecording();
+  } else {
+    stopRecording();
   }
 }
 
-function startRecording() {
-  // Check if already recording
-  if (state.recording) return;
+async function startRecording() {
+  // منع بدء التسجيل إذا كان قيد التشغيل بالفعل
+  if (state.recording) {
+    showToast('⚠️ التسجيل قيد التشغيل بالفعل', 'info');
+    return;
+  }
   
-  // Reset transcript
-  state.transcript = '';
+  // طلب إذن الميكروفون أولاً
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach(track => track.stop()); // فقط للتحقق من الإذن
+  } catch (err) {
+    showToast('⚠️ يرجى السماح بالوصول إلى الميكروفون', 'error');
+    return;
+  }
   
-  // Check for Speech Recognition support
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   
   if (!SpeechRecognition) {
@@ -100,21 +108,25 @@ function startRecording() {
     demoMode();
     return;
   }
-
+  
   try {
     state.recognition = new SpeechRecognition();
-    state.recognition.continuous = true;
+    
+    // إعدادات محسنة لمنع التكرار
+    state.recognition.continuous = false;  // تغيير إلى false لمنع التكرار
     state.recognition.interimResults = true;
     state.recognition.lang = state.language;
+    state.recognition.maxAlternatives = 1;  // أخذ أفضل نتيجة فقط
     
     let finalTranscript = '';
-
+    let interimText = '';
+    
     state.recognition.onstart = () => {
       state.recording = true;
       const micBtn = document.getElementById('micBtn');
       micBtn.classList.add('recording');
       micBtn.textContent = '🔴';
-      document.getElementById('recordStatusText').textContent = '● جاري التسجيل... تحدث الآن';
+      document.getElementById('recordStatusText').textContent = '🎤 جاري التسجيل... تحدث الآن';
       document.getElementById('recordTimer').classList.add('recording');
       document.getElementById('stopBtn').style.display = 'inline-flex';
       document.getElementById('proceedBtn').style.display = 'none';
@@ -122,47 +134,63 @@ function startRecording() {
       startTimer();
       state.waveInterval = setInterval(animateWaves, 150);
     };
-
+    
     state.recognition.onresult = (e) => {
-      let interimTranscript = '';
-      for (let i = e.resultIndex; i < e.results.length; i++) {
+      interimText = '';
+      
+      for (let i = 0; i < e.results.length; i++) {
         const transcript = e.results[i][0].transcript;
         if (e.results[i].isFinal) {
-          finalTranscript += transcript + ' ';
+          // إضافة النص النهائي مع مسافة
+          if (finalTranscript.length > 0 && !finalTranscript.endsWith(' ')) {
+            finalTranscript += ' ';
+          }
+          finalTranscript += transcript;
         } else {
-          interimTranscript += transcript;
+          interimText += transcript;
         }
       }
       
-      const displayText = finalTranscript + interimTranscript;
+      // عرض النص المؤقت والنهائي
+      const displayText = finalTranscript + (interimText ? ' ' + interimText : '');
       document.getElementById('liveTranscript').innerHTML = 
         `<span style="color:var(--text)">${escapeHtml(displayText)}</span>`;
       state.transcript = displayText;
     };
-
+    
     state.recognition.onerror = (e) => {
       console.error('Speech recognition error:', e.error);
-      if (e.error !== 'aborted' && e.error !== 'no-speech') {
-        showToast('⚠️ خطأ في التعرف: ' + e.error, 'error');
-      }
+      
       if (e.error === 'not-allowed') {
         showToast('⚠️ يرجى السماح بالوصول إلى الميكروفون', 'error');
         resetRecordingUI();
+      } else if (e.error === 'no-speech') {
+        showToast('🎤 لم يتم اكتشاف صوت. حاول التحدث بوضوح', 'info');
+        // لا نوقف التسجيل، فقط نعطي تنبيه
+      } else if (e.error === 'audio-capture') {
+        showToast('⚠️ لا يمكن الوصول إلى الميكروفون', 'error');
+        resetRecordingUI();
+      } else if (e.error !== 'aborted') {
+        showToast('⚠️ خطأ: ' + e.error, 'error');
+        resetRecordingUI();
       }
     };
-
+    
     state.recognition.onend = () => {
-      if (state.recording) {
-        // Auto-restart if still recording
-        try {
-          state.recognition.start();
-        } catch (e) {
-          console.log('Could not restart recognition');
+      // منع إعادة التشغيل التلقائي
+      if (state.recording && !state.isRestarting) {
+        // إذا كان لا يزال في وضع التسجيل، ننهي التسجيل بشكل طبيعي
+        if (state.transcript && state.transcript.trim()) {
+          // يوجد نص، ننهي التسجيل بنجاح
+          stopRecording();
+        } else {
+          // لا يوجد نص، نعطي فرصة ثانية
+          showToast('🎤 لم يتم التعرف على كلام. حاول مرة أخرى', 'info');
           resetRecordingUI();
         }
       }
     };
-
+    
     state.recognition.start();
     
   } catch (e) {
@@ -175,10 +203,12 @@ function startRecording() {
 function stopRecording() {
   if (state.recognition) {
     try {
-      state.recognition.onend = null;
-      state.recognition.stop();
+      state.isRestarting = true;
+      state.recognition.abort();  // استخدام abort بدلاً من stop لمنع إعادة التشغيل
     } catch (e) {
       console.log('Error stopping recognition:', e);
+    } finally {
+      state.isRestarting = false;
     }
   }
   
@@ -198,20 +228,27 @@ function stopRecording() {
     showToast('✓ تم التسجيل بنجاح', 'success');
   } else {
     showToast('⚠️ لم يتم التعرف على صوت. جرّب مرة أخرى.', 'error');
-    const micBtn = document.getElementById('micBtn');
-    micBtn.textContent = '🎙️';
-    micBtn.classList.remove('recording');
-    document.getElementById('recordStatusText').textContent = 'اضغط للبدء في التسجيل';
   }
 }
 
 function resetRecordingUI() {
   const micBtn = document.getElementById('micBtn');
-  micBtn.classList.remove('recording');
-  micBtn.textContent = '🎙️';
-  document.getElementById('recordStatusText').textContent = 'اضغط للبدء في التسجيل';
-  document.getElementById('recordTimer').classList.remove('recording');
-  document.getElementById('stopBtn').style.display = 'none';
+  if (micBtn) {
+    micBtn.textContent = '🎙️';
+    micBtn.classList.remove('recording');
+  }
+  
+  const recordStatus = document.getElementById('recordStatusText');
+  if (recordStatus) recordStatus.textContent = 'اضغط للبدء في التسجيل';
+  
+  const recordTimer = document.getElementById('recordTimer');
+  if (recordTimer) {
+    recordTimer.textContent = '00:00';
+    recordTimer.classList.remove('recording');
+  }
+  
+  const stopBtn = document.getElementById('stopBtn');
+  if (stopBtn) stopBtn.style.display = 'none';
 }
 
 function demoMode() {
@@ -230,7 +267,7 @@ function demoMode() {
   startTimer();
   state.waveInterval = setInterval(animateWaves, 150);
   
-  // Simulate live text
+  // Simulate live text with better pacing
   const demoTexts = [
     'مريض ذكر عمره 42 سنة يشكو من ألم في الحلق',
     ' وارتفاع في درجة الحرارة منذ يومين مع سعال جاف',
@@ -251,8 +288,14 @@ function demoMode() {
     } else {
       clearInterval(state.demoInterval);
       state.demoInterval = null;
+      // Auto-stop demo after completion
+      setTimeout(() => {
+        if (state.recording) {
+          stopRecording();
+        }
+      }, 500);
     }
-  }, 800);
+  }, 1000);
 }
 
 // Helper function to escape HTML
@@ -319,7 +362,7 @@ async function generatePrescription() {
   document.getElementById('aiGenerating').style.display = 'block';
   document.getElementById('prescriptionForm').style.display = 'none';
   
-  // Simulate AI processing (since we don't have API key)
+  // Simulate AI processing
   setTimeout(() => {
     const demoData = getDemoData(text);
     fillPrescriptionForm(demoData);
@@ -329,12 +372,10 @@ async function generatePrescription() {
 function getDemoData(text) {
   const hasArabic = /[\u0600-\u06FF]/.test(text);
   
-  // Extract age if present
   let age = 'غير محدد';
   const ageMatch = text.match(/(\d+)\s*سنة/);
   if (ageMatch) age = ageMatch[1] + ' سنة';
   
-  // Extract gender
   let gender = 'غير محدد';
   if (text.includes('ذكر')) gender = 'ذكر';
   if (text.includes('أنثى') || text.includes('انثى')) gender = 'أنثى';
@@ -347,10 +388,9 @@ function getDemoData(text) {
     diagnoses: ['التهاب اللوزتين الحاد', 'التهاب البلعوم'],
     medications: [
       { name: 'أموكسيسيلين 500mg', dose: '1 كبسولة', frequency: '3 مرات يومياً', duration: '7 أيام', timing: 'بعد الأكل' },
-      { name: 'باراسيتامول 500mg', dose: '2 حبة', frequency: 'كل 8 ساعات', duration: '3 أيام', timing: 'عند الحاجة' },
-      { name: 'غرغرة كلورهيكسيدين', dose: '15 مل', frequency: '3 مرات يومياً', duration: '5 أيام', timing: 'بعد الأكل' }
+      { name: 'باراسيتامول 500mg', dose: '2 حبة', frequency: 'كل 8 ساعات', duration: '3 أيام', timing: 'عند الحاجة' }
     ],
-    advice: 'الراحة التامة في المنزل — الإكثار من السوائل الدافئة — تجنب الأطعمة الحارة والمشروبات الباردة — ارتداء الملابس الدافئة — التوقف عن التدخين إن وجد',
+    advice: 'الراحة التامة في المنزل — الإكثار من السوائل الدافئة — تجنب الأطعمة الحارة',
     followUp: 'بعد أسبوع إذا لم تتحسن الحالة'
   };
 }
@@ -365,15 +405,12 @@ function fillPrescriptionForm(data) {
   document.getElementById('adviceText').value = data.advice || '';
   document.getElementById('followUp').value = data.followUp || '';
   
-  // Symptoms
   state.symptoms = data.symptoms || [];
   renderTags('symptomsTags', state.symptoms, 'symptoms');
   
-  // Diagnoses
   state.diagnoses = data.diagnoses || [];
   renderTags('diagnosisTags', state.diagnoses, 'diagnoses');
   
-  // Medications
   state.medications = data.medications || [];
   renderMedications();
   
@@ -455,7 +492,6 @@ function closeAddMedModal() {
   const modal = document.getElementById('addMedModal');
   if (modal) modal.classList.remove('open');
   
-  // Clear form
   document.getElementById('medName').value = '';
   document.getElementById('medDose').value = '';
   document.getElementById('medDuration').value = '';
@@ -483,7 +519,6 @@ function addMedication() {
 
 // ================== STEP 4: PRINT ==================
 function goToStep4() {
-  // Validate required fields
   if (state.symptoms.length === 0 && state.diagnoses.length === 0 && state.medications.length === 0) {
     showToast('⚠️ يرجى إكمال بيانات الوصفة أولاً', 'error');
     return;
@@ -506,15 +541,7 @@ function buildPrintPreview() {
   
   const medsHTML = state.medications.length > 0 ? `
     <table class="print-med-table">
-      <thead>
-        <tr>
-          <th>اسم الدواء</th>
-          <th>الجرعة</th>
-          <th>التكرار</th>
-          <th>المدة</th>
-          <th>الملاحظات</th>
-        </tr>
-      </thead>
+      <thead><tr><th>اسم الدواء</th><th>الجرعة</th><th>التكرار</th><th>المدة</th><th>الملاحظات</th></tr></thead>
       <tbody>
         ${state.medications.map(m => `
           <tr>
@@ -581,7 +608,6 @@ function printPrescription() {
 }
 
 function startNew() {
-  // Reset all state
   if (state.recognition) {
     try {
       state.recognition.abort();
@@ -603,35 +629,18 @@ function startNew() {
   state.diagnoses = [];
   state.seconds = 0;
   state.recording = false;
+  state.isRestarting = false;
   
-  // Reset UI
-  const micBtn = document.getElementById('micBtn');
-  if (micBtn) {
-    micBtn.textContent = '🎙️';
-    micBtn.classList.remove('recording');
-  }
-  
-  const recordStatus = document.getElementById('recordStatusText');
-  if (recordStatus) recordStatus.textContent = 'اضغط للبدء في التسجيل';
-  
-  const recordTimer = document.getElementById('recordTimer');
-  if (recordTimer) {
-    recordTimer.textContent = '00:00';
-    recordTimer.classList.remove('recording');
-  }
+  resetRecordingUI();
   
   const liveTranscript = document.getElementById('liveTranscript');
   if (liveTranscript) {
     liveTranscript.innerHTML = '<span class="transcript-placeholder">سيظهر النص هنا أثناء التسجيل...</span>';
   }
   
-  const stopBtn = document.getElementById('stopBtn');
-  if (stopBtn) stopBtn.style.display = 'none';
-  
   const proceedBtn = document.getElementById('proceedBtn');
   if (proceedBtn) proceedBtn.style.display = 'none';
   
-  // Reset form fields
   const formFields = ['patientName', 'patientAge', 'adviceText', 'followUp'];
   formFields.forEach(field => {
     const el = document.getElementById(field);
@@ -644,14 +653,12 @@ function startNew() {
   const dateInput = document.getElementById('prescDate');
   if (dateInput) dateInput.valueAsDate = new Date();
   
-  // Reset tags containers
   const symptomsTags = document.getElementById('symptomsTags');
   if (symptomsTags) symptomsTags.innerHTML = '';
   
   const diagnosisTags = document.getElementById('diagnosisTags');
   if (diagnosisTags) diagnosisTags.innerHTML = '';
   
-  // Reset medications list
   const medsList = document.getElementById('medicationsList');
   if (medsList) medsList.innerHTML = '';
   
@@ -668,7 +675,6 @@ function activateStep(n) {
     const panel = document.getElementById('panel' + i);
     const step = document.getElementById('step' + i);
     const circle = step?.querySelector('.step-circle');
-    const label = step?.querySelector('.step-label');
     
     if (panel) panel.classList.toggle('active', i === n);
     if (step) step.classList.toggle('active', i === n);
@@ -684,7 +690,6 @@ function activateStep(n) {
     }
   }
   
-  // Update connectors
   for (let i = 1; i <= 3; i++) {
     const conn = document.getElementById('conn' + i);
     if (conn) conn.classList.toggle('active', i < n);
@@ -702,6 +707,7 @@ function showToast(msg, type = '') {
   t.className = 'toast show';
   if (type === 'success') t.classList.add('success');
   if (type === 'error') t.classList.add('error');
+  if (type === 'info') t.classList.add('info');
   
   setTimeout(() => {
     t.classList.remove('show');
