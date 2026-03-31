@@ -1,4 +1,3 @@
- 
 // ================== STATE ==================
 let state = {
   recording: false,
@@ -9,16 +8,29 @@ let state = {
   language: 'ar-SA',
   medications: [],
   symptoms: [],
-  diagnoses: []
+  diagnoses: [],
+  waveInterval: null,
+  demoInterval: null
 };
 
 // ================== INIT ==================
 window.onload = () => {
   buildWaves();
   document.getElementById('prescDate').valueAsDate = new Date();
-  setupTagsInput('symptomsInput', 'symptomsTags', state.symptoms);
-  setupTagsInput('diagnosisInput', 'diagnosisTags', state.diagnoses);
+  setupTagsInput('symptomsInput', 'symptomsTags', state.symptoms, 'symptoms');
+  setupTagsInput('diagnosisInput', 'diagnosisTags', state.diagnoses, 'diagnoses');
+  checkSpeechRecognitionSupport();
 };
+
+// Check browser support
+function checkSpeechRecognitionSupport() {
+  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+    showToast('⚠️ متصفحك لا يدعم التعرف على الصوت. سيتم استخدام الوضع التجريبي.', 'error');
+    setTimeout(() => {
+      showToast('💡 استخدم Chrome أو Edge للحصول على أفضل تجربة', 'info');
+    }, 2000);
+  }
+}
 
 // LANGUAGE SELECTION
 document.querySelectorAll('.lang-chip').forEach(btn => {
@@ -26,12 +38,16 @@ document.querySelectorAll('.lang-chip').forEach(btn => {
     document.querySelectorAll('.lang-chip').forEach(b => b.classList.remove('selected'));
     btn.classList.add('selected');
     state.language = btn.dataset.lang;
+    if (state.recognition && state.recognition.lang) {
+      state.recognition.lang = state.language;
+    }
   };
 });
 
 // ================== WAVE BARS ==================
 function buildWaves() {
   const c = document.getElementById('waveContainer');
+  if (!c) return;
   c.innerHTML = '';
   for (let i = 0; i < 40; i++) {
     const b = document.createElement('div');
@@ -50,201 +66,283 @@ function animateWaves() {
   });
 }
 
+function stopWaveAnimation() {
+  if (state.waveInterval) {
+    clearInterval(state.waveInterval);
+    state.waveInterval = null;
+  }
+  const bars = document.querySelectorAll('.wave-bar');
+  bars.forEach(b => {
+    b.classList.remove('active');
+    b.style.height = '4px';
+  });
+}
+
 // ================== RECORDING ==================
 function toggleRecording() {
-  if (!state.recording) startRecording();
+  if (!state.recording) {
+    startRecording();
+  }
 }
 
 function startRecording() {
-  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-    showToast('⚠️ المتصفح لا يدعم التعرف على الصوت. استخدم Chrome أو Edge', 'error');
-    // Demo mode fallback
+  // Check if already recording
+  if (state.recording) return;
+  
+  // Reset transcript
+  state.transcript = '';
+  
+  // Check for Speech Recognition support
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  
+  if (!SpeechRecognition) {
+    showToast('⚠️ المتصفح لا يدعم التعرف على الصوت. جارٍ تفعيل الوضع التجريبي...', 'error');
     demoMode();
     return;
   }
 
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  state.recognition = new SR();
-  state.recognition.continuous = true;
-  state.recognition.interimResults = true;
-  state.recognition.lang = state.language;
+  try {
+    state.recognition = new SpeechRecognition();
+    state.recognition.continuous = true;
+    state.recognition.interimResults = true;
+    state.recognition.lang = state.language;
+    
+    let finalTranscript = '';
 
-  let finalTranscript = '';
+    state.recognition.onstart = () => {
+      state.recording = true;
+      const micBtn = document.getElementById('micBtn');
+      micBtn.classList.add('recording');
+      micBtn.textContent = '🔴';
+      document.getElementById('recordStatusText').textContent = '● جاري التسجيل... تحدث الآن';
+      document.getElementById('recordTimer').classList.add('recording');
+      document.getElementById('stopBtn').style.display = 'inline-flex';
+      document.getElementById('proceedBtn').style.display = 'none';
+      document.getElementById('liveTranscript').innerHTML = '<span class="live-text">🔊 يستمع...</span>';
+      startTimer();
+      state.waveInterval = setInterval(animateWaves, 150);
+    };
 
-  state.recognition.onstart = () => {
-    state.recording = true;
-    document.getElementById('micBtn').classList.add('recording');
-    document.getElementById('micBtn').textContent = '🔴';
-    document.getElementById('recordStatusText').textContent = '● جاري التسجيل...';
-    document.getElementById('recordTimer').classList.add('recording');
-    document.getElementById('stopBtn').style.display = 'inline-flex';
-    document.getElementById('proceedBtn').style.display = 'none';
-    document.getElementById('liveTranscript').innerHTML = '<span class="live-text">يستمع...</span>';
-    startTimer();
-    state.waveInterval = setInterval(animateWaves, 150);
-  };
+    state.recognition.onresult = (e) => {
+      let interimTranscript = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const transcript = e.results[i][0].transcript;
+        if (e.results[i].isFinal) {
+          finalTranscript += transcript + ' ';
+        } else {
+          interimTranscript += transcript;
+        }
+      }
+      
+      const displayText = finalTranscript + interimTranscript;
+      document.getElementById('liveTranscript').innerHTML = 
+        `<span style="color:var(--text)">${escapeHtml(displayText)}</span>`;
+      state.transcript = displayText;
+    };
 
-  state.recognition.onresult = (e) => {
-    let interimTranscript = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const t = e.results[i][0].transcript;
-      if (e.results[i].isFinal) finalTranscript += t + ' ';
-      else interimTranscript += t;
-    }
-    document.getElementById('liveTranscript').innerHTML =
-      `<span style="color:var(--text)">${finalTranscript}</span><span style="color:var(--text-muted)">${interimTranscript}</span>`;
-    state.transcript = finalTranscript + interimTranscript;
-  };
+    state.recognition.onerror = (e) => {
+      console.error('Speech recognition error:', e.error);
+      if (e.error !== 'aborted' && e.error !== 'no-speech') {
+        showToast('⚠️ خطأ في التعرف: ' + e.error, 'error');
+      }
+      if (e.error === 'not-allowed') {
+        showToast('⚠️ يرجى السماح بالوصول إلى الميكروفون', 'error');
+        resetRecordingUI();
+      }
+    };
 
-  state.recognition.onerror = (e) => {
-    if (e.error !== 'aborted') {
-      showToast('⚠️ خطأ: ' + e.error, 'error');
-    }
-  };
+    state.recognition.onend = () => {
+      if (state.recording) {
+        // Auto-restart if still recording
+        try {
+          state.recognition.start();
+        } catch (e) {
+          console.log('Could not restart recognition');
+          resetRecordingUI();
+        }
+      }
+    };
 
-  state.recognition.onend = () => {
-    if (state.recording) state.recognition.start();
-  };
-
-  state.recognition.start();
+    state.recognition.start();
+    
+  } catch (e) {
+    console.error('Failed to start recognition:', e);
+    showToast('⚠️ فشل في بدء التسجيل. جارٍ تفعيل الوضع التجريبي...', 'error');
+    demoMode();
+  }
 }
 
 function stopRecording() {
-  state.recording = false;
   if (state.recognition) {
-    state.recognition.onend = null;
-    state.recognition.stop();
+    try {
+      state.recognition.onend = null;
+      state.recognition.stop();
+    } catch (e) {
+      console.log('Error stopping recognition:', e);
+    }
   }
+  
+  if (state.demoInterval) {
+    clearInterval(state.demoInterval);
+    state.demoInterval = null;
+  }
+  
+  state.recording = false;
   clearInterval(state.timer);
-  clearInterval(state.waveInterval);
-
-  document.getElementById('micBtn').classList.remove('recording');
-  document.getElementById('micBtn').textContent = '✓';
-  document.getElementById('recordStatusText').textContent = '✓ تم إيقاف التسجيل';
-  document.getElementById('recordTimer').classList.remove('recording');
-  document.getElementById('stopBtn').style.display = 'none';
-
-  const bars = document.querySelectorAll('.wave-bar');
-  bars.forEach(b => { b.classList.remove('active'); b.style.height = '4px'; });
-
-  if (state.transcript.trim()) {
+  stopWaveAnimation();
+  
+  resetRecordingUI();
+  
+  if (state.transcript && state.transcript.trim()) {
     document.getElementById('proceedBtn').style.display = 'inline-flex';
     showToast('✓ تم التسجيل بنجاح', 'success');
   } else {
     showToast('⚠️ لم يتم التعرف على صوت. جرّب مرة أخرى.', 'error');
-    document.getElementById('micBtn').textContent = '🎙️';
+    const micBtn = document.getElementById('micBtn');
+    micBtn.textContent = '🎙️';
+    micBtn.classList.remove('recording');
     document.getElementById('recordStatusText').textContent = 'اضغط للبدء في التسجيل';
   }
 }
 
+function resetRecordingUI() {
+  const micBtn = document.getElementById('micBtn');
+  micBtn.classList.remove('recording');
+  micBtn.textContent = '🎙️';
+  document.getElementById('recordStatusText').textContent = 'اضغط للبدء في التسجيل';
+  document.getElementById('recordTimer').classList.remove('recording');
+  document.getElementById('stopBtn').style.display = 'none';
+}
+
 function demoMode() {
-  // Demo for non-Chrome browsers
+  if (state.demoInterval) {
+    clearInterval(state.demoInterval);
+  }
+  
   state.recording = true;
-  document.getElementById('micBtn').classList.add('recording');
-  document.getElementById('micBtn').textContent = '🔴';
-  document.getElementById('recordStatusText').textContent = '● وضع العرض التجريبي';
+  const micBtn = document.getElementById('micBtn');
+  micBtn.classList.add('recording');
+  micBtn.textContent = '🔴';
+  document.getElementById('recordStatusText').textContent = '● وضع العرض التجريبي (محاكاة)';
   document.getElementById('recordTimer').classList.add('recording');
   document.getElementById('stopBtn').style.display = 'inline-flex';
+  document.getElementById('proceedBtn').style.display = 'none';
   startTimer();
   state.waveInterval = setInterval(animateWaves, 150);
-
+  
   // Simulate live text
-  const demoText = 'مريض ذكر عمره 42 سنة يشكو من ألم في الحلق وارتفاع في درجة الحرارة منذ يومين مع سعال جاف وصعوبة في البلع، لا يوجد حساسية من الأدوية، لم يتناول أي مدة علاجية سابقة.';
-  let i = 0;
+  const demoTexts = [
+    'مريض ذكر عمره 42 سنة يشكو من ألم في الحلق',
+    ' وارتفاع في درجة الحرارة منذ يومين مع سعال جاف',
+    ' وصعوبة في البلع، لا يوجد حساسية من الأدوية',
+    '، لم يتناول أي علاج سابق.'
+  ];
+  
+  let fullText = '';
+  let index = 0;
+  
   state.demoInterval = setInterval(() => {
-    i += 3;
-    if (i >= demoText.length) {
-      i = demoText.length;
+    if (index < demoTexts.length) {
+      fullText += demoTexts[index];
+      document.getElementById('liveTranscript').innerHTML = 
+        `<span style="color:var(--text)">${escapeHtml(fullText)}</span>`;
+      state.transcript = fullText;
+      index++;
+    } else {
       clearInterval(state.demoInterval);
+      state.demoInterval = null;
     }
-    const partial = demoText.slice(0, i);
-    document.getElementById('liveTranscript').innerHTML = `<span style="color:var(--text)">${partial}</span>`;
-    state.transcript = partial;
-  }, 60);
+  }, 800);
+}
+
+// Helper function to escape HTML
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
 }
 
 // ================== TIMER ==================
 function startTimer() {
+  if (state.timer) clearInterval(state.timer);
   state.seconds = 0;
   state.timer = setInterval(() => {
     state.seconds++;
     const m = String(Math.floor(state.seconds / 60)).padStart(2, '0');
     const s = String(state.seconds % 60).padStart(2, '0');
-    document.getElementById('recordTimer').textContent = `${m}:${s}`;
+    const timerElement = document.getElementById('recordTimer');
+    if (timerElement) {
+      timerElement.textContent = `${m}:${s}`;
+    }
   }, 1000);
 }
 
 // ================== STEP NAVIGATION ==================
 function goToStep2() {
-  if (!state.transcript.trim()) { showToast('⚠️ يرجى تسجيل الحالة أولاً', 'error'); return; }
+  if (!state.transcript || !state.transcript.trim()) {
+    showToast('⚠️ يرجى تسجيل الحالة أولاً', 'error');
+    return;
+  }
   activateStep(2);
   document.getElementById('transcriptEdit').value = state.transcript.trim();
-
+  
   // Detect language hint
   const hasArabic = /[\u0600-\u06FF]/.test(state.transcript);
-  document.getElementById('detectedLang').textContent = hasArabic ? '🇸🇦 عربية' : '🌐 Latin';
+  const detectedLangElement = document.getElementById('detectedLang');
+  if (detectedLangElement) {
+    detectedLangElement.textContent = hasArabic ? '🇸🇦 عربية' : '🌐 لغة لاتينية';
+  }
 }
 
-function goToStep1() { activateStep(1); }
-function goToStep2Back() { activateStep(2); }
-function goToStep3() { activateStep(3); document.getElementById('prescriptionForm').style.display = 'block'; document.getElementById('aiGenerating').style.display = 'none'; }
+function goToStep1() {
+  activateStep(1);
+}
+
+function goToStep2Back() {
+  activateStep(2);
+}
+
+function goToStep3() {
+  activateStep(3);
+  document.getElementById('prescriptionForm').style.display = 'block';
+  document.getElementById('aiGenerating').style.display = 'none';
+}
 
 async function generatePrescription() {
   const text = document.getElementById('transcriptEdit').value.trim();
-  if (!text) { showToast('⚠️ النص فارغ', 'error'); return; }
-
+  if (!text) {
+    showToast('⚠️ النص فارغ', 'error');
+    return;
+  }
+  
   activateStep(3);
   document.getElementById('aiGenerating').style.display = 'block';
   document.getElementById('prescriptionForm').style.display = 'none';
-
-  try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1000,
-        messages: [{
-          role: 'user',
-          content: `أنت مساعد طبي ذكي. بناءً على وصف الحالة التالية، أنشئ معاينة ووصفة طبية كاملة.
-
-الحالة المرضية: """${text}"""
-
-أعد الرد بصيغة JSON فقط (بدون markdown أو أي نص آخر) بهذا الشكل:
-{
-  "patientName": "غير محدد",
-  "patientAge": "العمر المذكور أو غير محدد",
-  "patientGender": "الجنس المذكور أو غير محدد",
-  "symptoms": ["عرض 1", "عرض 2"],
-  "diagnoses": ["تشخيص 1", "تشخيص 2"],
-  "medications": [
-    {"name": "اسم الدواء والجرعة", "dose": "الجرعة", "frequency": "التكرار", "duration": "المدة", "timing": "توقيت الأخذ"}
-  ],
-  "advice": "نصائح وتعليمات للمريض",
-  "followUp": "موعد المتابعة"
-}`
-        }]
-      })
-    });
-
-    const data = await response.json();
-    const raw = data.content.map(i => i.text || '').join('');
-    const clean = raw.replace(/```json|```/g, '').trim();
-    const result = JSON.parse(clean);
-    fillPrescriptionForm(result);
-
-  } catch (err) {
-    // Demo fallback
-    fillPrescriptionForm(getDemoData(text));
-  }
+  
+  // Simulate AI processing (since we don't have API key)
+  setTimeout(() => {
+    const demoData = getDemoData(text);
+    fillPrescriptionForm(demoData);
+  }, 1500);
 }
 
 function getDemoData(text) {
   const hasArabic = /[\u0600-\u06FF]/.test(text);
+  
+  // Extract age if present
+  let age = 'غير محدد';
+  const ageMatch = text.match(/(\d+)\s*سنة/);
+  if (ageMatch) age = ageMatch[1] + ' سنة';
+  
+  // Extract gender
+  let gender = 'غير محدد';
+  if (text.includes('ذكر')) gender = 'ذكر';
+  if (text.includes('أنثى') || text.includes('انثى')) gender = 'أنثى';
+  
   return {
     patientName: 'غير محدد',
-    patientAge: '35 سنة',
-    patientGender: 'ذكر',
+    patientAge: age,
+    patientGender: gender,
     symptoms: ['ألم في الحلق', 'ارتفاع الحرارة', 'سعال جاف'],
     diagnoses: ['التهاب اللوزتين الحاد', 'التهاب البلعوم'],
     medications: [
@@ -260,96 +358,137 @@ function getDemoData(text) {
 function fillPrescriptionForm(data) {
   document.getElementById('aiGenerating').style.display = 'none';
   document.getElementById('prescriptionForm').style.display = 'block';
-
+  
   document.getElementById('patientName').value = data.patientName || '';
   document.getElementById('patientAge').value = data.patientAge || '';
   document.getElementById('patientGender').value = data.patientGender || '';
   document.getElementById('adviceText').value = data.advice || '';
   document.getElementById('followUp').value = data.followUp || '';
-
+  
   // Symptoms
   state.symptoms = data.symptoms || [];
   renderTags('symptomsTags', state.symptoms, 'symptoms');
-
+  
   // Diagnoses
   state.diagnoses = data.diagnoses || [];
   renderTags('diagnosisTags', state.diagnoses, 'diagnoses');
-
+  
   // Medications
   state.medications = data.medications || [];
   renderMedications();
-
+  
   showToast('✓ تم توليد المعاينة والوصفة بنجاح', 'success');
 }
 
 // ================== TAGS SYSTEM ==================
-function setupTagsInput(inputId, tagsId, arr) {
+function setupTagsInput(inputId, tagsId, arr, type) {
   const input = document.getElementById(inputId);
+  if (!input) return;
+  
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && input.value.trim()) {
       e.preventDefault();
       const val = input.value.trim();
-      arr.push(val);
+      if (!arr.includes(val)) {
+        arr.push(val);
+        renderTags(tagsId, arr, type);
+      }
       input.value = '';
-      const type = inputId.includes('symptoms') ? 'symptoms' : 'diagnoses';
-      renderTags(tagsId, arr, type);
     }
   });
 }
 
 function renderTags(containerId, arr, type) {
   const container = document.getElementById(containerId);
+  if (!container) return;
+  
   container.innerHTML = arr.map((tag, i) =>
-    `<span class="diagnosis-tag">${tag} <span class="remove" onclick="removeTag('${type}', ${i})">×</span></span>`
+    `<span class="diagnosis-tag">${escapeHtml(tag)} <span class="remove" onclick="removeTag('${type}', ${i})">×</span></span>`
   ).join('');
 }
 
 function removeTag(type, index) {
-  if (type === 'symptoms') { state.symptoms.splice(index, 1); renderTags('symptomsTags', state.symptoms, 'symptoms'); }
-  else { state.diagnoses.splice(index, 1); renderTags('diagnosisTags', state.diagnoses, 'diagnoses'); }
+  if (type === 'symptoms') {
+    state.symptoms.splice(index, 1);
+    renderTags('symptomsTags', state.symptoms, 'symptoms');
+  } else if (type === 'diagnoses') {
+    state.diagnoses.splice(index, 1);
+    renderTags('diagnosisTags', state.diagnoses, 'diagnoses');
+  }
 }
 
 // ================== MEDICATIONS ==================
 function renderMedications() {
   const list = document.getElementById('medicationsList');
+  if (!list) return;
+  
+  if (state.medications.length === 0) {
+    list.innerHTML = '<p style="color: var(--text-muted); text-align: center; padding: 20px;">لا توجد أدوية مضافة</p>';
+    return;
+  }
+  
   list.innerHTML = state.medications.map((med, i) => `
     <div class="med-item">
       <div>
-        <div class="med-name">💊 ${med.name}</div>
-        <div class="med-detail">${med.dose} — ${med.timing}</div>
+        <div class="med-name">💊 ${escapeHtml(med.name)}</div>
+        <div class="med-detail">${escapeHtml(med.dose || 'جرعة غير محددة')} — ${escapeHtml(med.timing || 'بعد الأكل')}</div>
       </div>
-      <div class="med-badge">${med.frequency}</div>
-      <div class="med-duration">⏱️ ${med.duration}</div>
+      <div class="med-badge">${escapeHtml(med.frequency || 'مرة يومياً')}</div>
+      <div class="med-duration">⏱️ ${escapeHtml(med.duration || 'غير محدد')}</div>
       <button class="med-remove" onclick="removeMed(${i})">🗑️</button>
     </div>
   `).join('');
 }
 
-function removeMed(i) { state.medications.splice(i, 1); renderMedications(); }
-
-function openAddMedModal() { document.getElementById('addMedModal').classList.add('open'); }
-function closeAddMedModal() { document.getElementById('addMedModal').classList.remove('open'); }
-
-function addMedication() {
-  const name = document.getElementById('medName').value.trim();
-  if (!name) { showToast('⚠️ أدخل اسم الدواء', 'error'); return; }
-  state.medications.push({
-    name,
-    dose: document.getElementById('medDose').value || '',
-    frequency: document.getElementById('medFreq').value,
-    duration: document.getElementById('medDuration').value || '',
-    timing: document.getElementById('medTiming').value
-  });
+function removeMed(i) {
+  state.medications.splice(i, 1);
   renderMedications();
+  showToast('✓ تم حذف الدواء', 'success');
+}
+
+function openAddMedModal() {
+  const modal = document.getElementById('addMedModal');
+  if (modal) modal.classList.add('open');
+}
+
+function closeAddMedModal() {
+  const modal = document.getElementById('addMedModal');
+  if (modal) modal.classList.remove('open');
+  
+  // Clear form
   document.getElementById('medName').value = '';
   document.getElementById('medDose').value = '';
   document.getElementById('medDuration').value = '';
+}
+
+function addMedication() {
+  const name = document.getElementById('medName').value.trim();
+  if (!name) {
+    showToast('⚠️ أدخل اسم الدواء', 'error');
+    return;
+  }
+  
+  state.medications.push({
+    name: name,
+    dose: document.getElementById('medDose').value || 'حسب التعليمات',
+    frequency: document.getElementById('medFreq').value,
+    duration: document.getElementById('medDuration').value || 'حسب التعليمات',
+    timing: document.getElementById('medTiming').value
+  });
+  
+  renderMedications();
   closeAddMedModal();
   showToast('✓ تم إضافة الدواء', 'success');
 }
 
 // ================== STEP 4: PRINT ==================
 function goToStep4() {
+  // Validate required fields
+  if (state.symptoms.length === 0 && state.diagnoses.length === 0 && state.medications.length === 0) {
+    showToast('⚠️ يرجى إكمال بيانات الوصفة أولاً', 'error');
+    return;
+  }
+  
   activateStep(4);
   buildPrintPreview();
 }
@@ -361,56 +500,69 @@ function buildPrintPreview() {
   const date = document.getElementById('prescDate').value || new Date().toLocaleDateString('ar-SA');
   const followUp = document.getElementById('followUp').value;
   const advice = document.getElementById('adviceText').value;
-
-  const diagTagsHTML = state.diagnoses.map(d => `<span class="print-diag-tag">${d}</span>`).join('');
-  const sympTagsHTML = state.symptoms.map(s => `<span class="print-diag-tag" style="background:#fff8e1;border-color:#ffe082;color:#795548">${s}</span>`).join('');
-
+  
+  const diagTagsHTML = state.diagnoses.map(d => `<span class="print-diag-tag">${escapeHtml(d)}</span>`).join('');
+  const sympTagsHTML = state.symptoms.map(s => `<span class="print-diag-tag" style="background:#fff8e1;border-color:#ffe082;color:#795548">${escapeHtml(s)}</span>`).join('');
+  
   const medsHTML = state.medications.length > 0 ? `
     <table class="print-med-table">
-      <thead><tr><th>اسم الدواء</th><th>الجرعة</th><th>التكرار</th><th>المدة</th><th>الملاحظات</th></tr></thead>
+      <thead>
+        <tr>
+          <th>اسم الدواء</th>
+          <th>الجرعة</th>
+          <th>التكرار</th>
+          <th>المدة</th>
+          <th>الملاحظات</th>
+        </tr>
+      </thead>
       <tbody>
-        ${state.medications.map(m => `<tr>
-          <td><strong>${m.name}</strong></td>
-          <td>${m.dose}</td>
-          <td>${m.frequency}</td>
-          <td>${m.duration}</td>
-          <td>${m.timing}</td>
-        </tr>`).join('')}
+        ${state.medications.map(m => `
+          <tr>
+            <td><strong>${escapeHtml(m.name)}</strong></td>
+            <td>${escapeHtml(m.dose)}</td>
+            <td>${escapeHtml(m.frequency)}</td>
+            <td>${escapeHtml(m.duration)}</td>
+            <td>${escapeHtml(m.timing)}</td>
+          </tr>
+        `).join('')}
       </tbody>
     </table>
-  ` : '<p style="color:#888;font-size:14px">لا توجد أدوية</p>';
-
-  document.getElementById('printPreview').innerHTML = `
+  ` : '<p style="color:#888;font-size:14px;text-align:center">لا توجد أدوية موصوفة</p>';
+  
+  const previewDiv = document.getElementById('printPreview');
+  if (!previewDiv) return;
+  
+  previewDiv.innerHTML = `
     <div class="print-watermark">Rx</div>
     <div class="print-header">
       <div>
         <div class="print-clinic-name">⚕️ المساعد الطبي الذكي</div>
-        <div class="print-doctor-info">Dr. AI Assistant — نظام المعاينات الطبية<br>تاريخ الإصدار: ${date}</div>
+        <div class="print-doctor-info">Dr. AI Assistant — نظام المعاينات الطبية<br>تاريخ الإصدار: ${escapeHtml(date)}</div>
       </div>
       <div class="print-rx-symbol">Rx</div>
     </div>
-
+    
     <div class="print-patient-row">
-      <span>المريض: <strong>${name}</strong></span>
-      ${age ? `<span>العمر: <strong>${age}</strong></span>` : ''}
-      ${gender ? `<span>الجنس: <strong>${gender}</strong></span>` : ''}
-      <span>التاريخ: <strong>${date}</strong></span>
+      <span>المريض: <strong>${escapeHtml(name)}</strong></span>
+      ${age ? `<span>العمر: <strong>${escapeHtml(age)}</strong></span>` : ''}
+      ${gender ? `<span>الجنس: <strong>${escapeHtml(gender)}</strong></span>` : ''}
+      <span>التاريخ: <strong>${escapeHtml(date)}</strong></span>
     </div>
-
-    ${sympTagsHTML ? `<div class="print-section-title">الأعراض</div><div class="print-diagnosis-tags">${sympTagsHTML}</div>` : ''}
-
-    <div class="print-section-title">التشخيص</div>
+    
+    ${sympTagsHTML ? `<div class="print-section-title">📋 الأعراض</div><div class="print-diagnosis-tags">${sympTagsHTML}</div>` : ''}
+    
+    <div class="print-section-title">🔍 التشخيص</div>
     <div class="print-diagnosis-tags">${diagTagsHTML || '<span style="color:#888">لم يحدد</span>'}</div>
-
-    <div class="print-section-title">الوصفة الطبية</div>
+    
+    <div class="print-section-title">💊 الوصفة الطبية</div>
     ${medsHTML}
-
-    ${advice ? `<div class="print-section-title">التعليمات والنصائح</div>
-    <p style="font-size:14px;line-height:1.8;color:#3a4555;padding:12px;background:#f7f9ff;border-radius:8px">${advice.replace(/\n/g, '<br>')}</p>` : ''}
-
-    ${followUp ? `<div class="print-section-title">موعد المتابعة</div>
-    <p style="font-size:14px;color:#3a4555;font-weight:600">📅 ${followUp}</p>` : ''}
-
+    
+    ${advice ? `<div class="print-section-title">📝 التعليمات والنصائح</div>
+    <p style="font-size:14px;line-height:1.8;color:#3a4555;padding:12px;background:#f7f9ff;border-radius:8px">${escapeHtml(advice).replace(/\n/g, '<br>')}</p>` : ''}
+    
+    ${followUp ? `<div class="print-section-title">📅 موعد المتابعة</div>
+    <p style="font-size:14px;color:#3a4555;font-weight:600">📅 ${escapeHtml(followUp)}</p>` : ''}
+    
     <div class="print-footer">
       <div style="font-size:12px;color:#aaa">
         تم التوليد بواسطة Dr. AI Assistant<br>
@@ -424,22 +576,85 @@ function buildPrintPreview() {
   `;
 }
 
-function printPrescription() { window.print(); }
+function printPrescription() {
+  window.print();
+}
 
 function startNew() {
+  // Reset all state
+  if (state.recognition) {
+    try {
+      state.recognition.abort();
+    } catch(e) {}
+  }
+  if (state.demoInterval) {
+    clearInterval(state.demoInterval);
+  }
+  if (state.timer) {
+    clearInterval(state.timer);
+  }
+  if (state.waveInterval) {
+    clearInterval(state.waveInterval);
+  }
+  
   state.transcript = '';
   state.medications = [];
   state.symptoms = [];
   state.diagnoses = [];
   state.seconds = 0;
-  document.getElementById('micBtn').textContent = '🎙️';
-  document.getElementById('micBtn').classList.remove('recording');
-  document.getElementById('recordStatusText').textContent = 'اضغط للبدء في التسجيل';
-  document.getElementById('recordTimer').textContent = '00:00';
-  document.getElementById('recordTimer').classList.remove('recording');
-  document.getElementById('liveTranscript').innerHTML = '<span class="transcript-placeholder">سيظهر النص هنا أثناء التسجيل...</span>';
-  document.getElementById('stopBtn').style.display = 'none';
-  document.getElementById('proceedBtn').style.display = 'none';
+  state.recording = false;
+  
+  // Reset UI
+  const micBtn = document.getElementById('micBtn');
+  if (micBtn) {
+    micBtn.textContent = '🎙️';
+    micBtn.classList.remove('recording');
+  }
+  
+  const recordStatus = document.getElementById('recordStatusText');
+  if (recordStatus) recordStatus.textContent = 'اضغط للبدء في التسجيل';
+  
+  const recordTimer = document.getElementById('recordTimer');
+  if (recordTimer) {
+    recordTimer.textContent = '00:00';
+    recordTimer.classList.remove('recording');
+  }
+  
+  const liveTranscript = document.getElementById('liveTranscript');
+  if (liveTranscript) {
+    liveTranscript.innerHTML = '<span class="transcript-placeholder">سيظهر النص هنا أثناء التسجيل...</span>';
+  }
+  
+  const stopBtn = document.getElementById('stopBtn');
+  if (stopBtn) stopBtn.style.display = 'none';
+  
+  const proceedBtn = document.getElementById('proceedBtn');
+  if (proceedBtn) proceedBtn.style.display = 'none';
+  
+  // Reset form fields
+  const formFields = ['patientName', 'patientAge', 'adviceText', 'followUp'];
+  formFields.forEach(field => {
+    const el = document.getElementById(field);
+    if (el) el.value = '';
+  });
+  
+  const genderSelect = document.getElementById('patientGender');
+  if (genderSelect) genderSelect.value = '';
+  
+  const dateInput = document.getElementById('prescDate');
+  if (dateInput) dateInput.valueAsDate = new Date();
+  
+  // Reset tags containers
+  const symptomsTags = document.getElementById('symptomsTags');
+  if (symptomsTags) symptomsTags.innerHTML = '';
+  
+  const diagnosisTags = document.getElementById('diagnosisTags');
+  if (diagnosisTags) diagnosisTags.innerHTML = '';
+  
+  // Reset medications list
+  const medsList = document.getElementById('medicationsList');
+  if (medsList) medsList.innerHTML = '';
+  
   buildWaves();
   activateStep(1);
   showToast('✓ جاهز لحالة جديدة', 'success');
@@ -447,41 +662,51 @@ function startNew() {
 
 // ================== STEP ACTIVATION ==================
 function activateStep(n) {
+  const icons = { 1: '🎙️', 2: '📝', 3: '🤖', 4: '🖨️' };
+  
   for (let i = 1; i <= 4; i++) {
     const panel = document.getElementById('panel' + i);
     const step = document.getElementById('step' + i);
-    const circle = step.querySelector('.step-circle');
-
-    panel.classList.toggle('active', i === n);
-    step.classList.toggle('active', i === n);
-    step.classList.toggle('done', i < n);
-    circle.classList.toggle('active', i === n);
-    circle.classList.toggle('done', i < n);
-
-    if (i < n) {
-      const icons = ['🎙️', '📝', '🤖', '🖨️'];
-      circle.textContent = '✓';
-    } else {
-      const icons = ['🎙️', '📝', '🤖', '🖨️'];
-      if (i !== 1 || !circle.classList.contains('done')) {
-        circle.textContent = i === n ? icons[i - 1] : icons[i - 1];
+    const circle = step?.querySelector('.step-circle');
+    const label = step?.querySelector('.step-label');
+    
+    if (panel) panel.classList.toggle('active', i === n);
+    if (step) step.classList.toggle('active', i === n);
+    if (step) step.classList.toggle('done', i < n);
+    if (circle) {
+      circle.classList.toggle('active', i === n);
+      circle.classList.toggle('done', i < n);
+      if (i < n) {
+        circle.textContent = '✓';
+      } else {
+        circle.textContent = icons[i] || '●';
       }
     }
   }
-
+  
+  // Update connectors
   for (let i = 1; i <= 3; i++) {
     const conn = document.getElementById('conn' + i);
-    conn.classList.toggle('active', i < n);
+    if (conn) conn.classList.toggle('active', i < n);
   }
-
+  
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 // ================== TOAST ==================
 function showToast(msg, type = '') {
   const t = document.getElementById('toast');
+  if (!t) return;
+  
   t.textContent = msg;
-  t.className = 'toast ' + type + ' show';
-  setTimeout(() => t.classList.remove('show'), 3000);
+  t.className = 'toast show';
+  if (type === 'success') t.classList.add('success');
+  if (type === 'error') t.classList.add('error');
+  
+  setTimeout(() => {
+    t.classList.remove('show');
+    setTimeout(() => {
+      t.className = 'toast';
+    }, 300);
+  }, 3000);
 }
- 
